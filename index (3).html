@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Smart Doubt Prioritization System</title>
+
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    darkMode: 'class',
+    theme: {
+      extend: {
+        colors: {
+          background: '#0f172a',
+          cardBg: '#1e293b',
+          primary: '#3b82f6',
+          high: '#ef4444',
+          medium: '#eab308',
+          low: '#22c55e'
+        },
+        boxShadow: {
+          neon: '0 0 15px rgba(59, 130, 246, 0.5)',
+          'glow-high': '0 0 10px rgba(239, 68, 68, 0.4)',
+          'glow-medium': '0 0 10px rgba(234, 179, 8, 0.4)',
+          'glow-low': '0 0 10px rgba(34, 197, 94, 0.4)'
+        }
+      }
+    }
+  };
+</script>
+
+<script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+
+<style>
+  body { font-family: 'Inter', sans-serif; background-color: #0f172a; color: #f8fafc; overflow-x: hidden; }
+  .glass { background: rgba(30,41,59,0.7); backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.1); }
+  .hide-scroll::-webkit-scrollbar { display: none; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+  .fade-in { animation: fadeIn 0.35s ease both; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid rgba(255,255,255,0.3); border-top-color: #fff; border-radius: 50%; animation: spin 0.7s linear infinite; }
+</style>
+</head>
+<body class="bg-background min-h-screen antialiased pb-20">
+
+<!-- ── EMBEDDED BACKEND (all in-memory, no server needed) ───────────── -->
+<script>
+// ── Data store (persisted to localStorage) ──────────────────────────
+var DB = {
+  users: JSON.parse(localStorage.getItem('da_users') || '[]'),
+  doubts: JSON.parse(localStorage.getItem('da_doubts') || '[]'),
+  save: function() {
+    localStorage.setItem('da_users', JSON.stringify(this.users));
+    localStorage.setItem('da_doubts', JSON.stringify(this.doubts));
+  }
+};
+
+// ── Simple hash (bcrypt not available in browser; use SHA-256 via SubtleCrypto) ──
+async function hashPassword(pw) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(pw));
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2,'0')).join('');
+}
+async function verifyPassword(pw, hash) {
+  return (await hashPassword(pw)) === hash;
+}
+
+// ── JWT-lite (sign/verify with HMAC-SHA256) ──────────────────────────
+async function hmacSign(payload, secret) {
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), {name:'HMAC',hash:'SHA-256'}, false, ['sign']);
+  const data = new TextEncoder().encode(JSON.stringify(payload));
+  const sig = await crypto.subtle.sign('HMAC', key, data);
+  const b64 = btoa(String.fromCharCode(...new Uint8Array(sig)));
+  return btoa(JSON.stringify(payload)) + '.' + b64;
+}
+async function hmacVerify(token, secret) {
+  try {
+    const [payloadB64, sig] = token.split('.');
+    const payload = JSON.parse(atob(payloadB64));
+    const expected = await hmacSign(payload, secret);
+    if (expected !== token) return null;
+    if (payload.exp && Date.now() > payload.exp) return null;
+    return payload;
+  } catch { return null; }
+}
+const JWT_SECRET = 'smartdoubt-secret-2024';
+async function signToken(user) {
+  return hmacSign({ id: user.id, email: user.email, role: user.role, exp: Date.now() + 7*24*60*60*1000 }, JWT_SECRET);
+}
+async function verifyToken(token) {
+  return token ? hmacVerify(token, JWT_SECRET) : null;
+}
+
+// ── Core analyze logic (exact port of server.js analyzeDoubt) ────────
+function analyzeDoubt(text, topic, deadline) {
+  var urgencyScore = 0, importanceScore = 0, difficultyScore = 0, dependencyScore = 0;
+  var reasonLines = [];
+  var textLower = (text || '').toLowerCase();
+  var topicLower = (topic || '').toLowerCase();
+  var deadlineLower = (deadline || '').toLowerCase();
+
+  var urgencyKw = ['exam','tomorrow','urgent','deadline','test','assignment','today'];
+  if (urgencyKw.some(function(k){return textLower.includes(k)||deadlineLower.includes(k);})) {
+    urgencyScore = 100; reasonLines.push('Urgent timeline detected (exam/deadline approaching).');
+  } else if (deadline) {
+    urgencyScore = 50; reasonLines.push('Has a deadline, requiring moderate attention.');
+  }
+
+  var coreTopics = ['dsa','dbms','os','system design','recursion','graphs','trees','dynamic programming','architecture'];
+  if (coreTopics.some(function(k){return textLower.includes(k)||topicLower.includes(k);})) {
+    importanceScore = 100; reasonLines.push('Core foundational topic spotted.');
+  } else if (topic) {
+    importanceScore = 50; reasonLines.push('Relates to specific topic: ' + topic + '.');
+  }
+
+  var conceptKw = ['concept','understand','logic','how','why','theory','architecture','polymorphism'];
+  var syntaxKw  = ['syntax','error','bug','compile','typo','semicolon'];
+  if (conceptKw.some(function(k){return textLower.includes(k);})) {
+    difficultyScore = 100; reasonLines.push('Conceptual difficulty requires deeper learning time.');
+  } else if (syntaxKw.some(function(k){return textLower.includes(k);})) {
+    difficultyScore = 20; reasonLines.push('Looks like a syntax error or bug, likely quick to fix.');
+  } else {
+    difficultyScore = 50;
+  }
+
+  var blockKw = ['block','stuck','cannot proceed','dependent','prerequisite'];
+  if (blockKw.some(function(k){return textLower.includes(k);})) {
+    dependencyScore = 100; reasonLines.push('Blocks understanding of subsequent concepts.');
+  }
+
+  var total = urgencyScore*0.4 + importanceScore*0.3 + difficultyScore*0.2 + dependencyScore*0.1;
+  var label = total >= 70 ? 'High' : total >= 40 ? 'Medium' : 'Low';
+  if (!reasonLines.length) reasonLines.push('General query.');
+  return { score: total, label: label, reason: reasonLines };
+}
+
+var idCounter = Date.now();
+
+// ── API surface (called from React) ──────────────────────────────────
+var API = {
+  register: async function(email, password, role) {
+    if (DB.users.find(function(u){return u.email.toLowerCase()===email.toLowerCase();}))
+      return {ok:false, error:'Email already exists'};
+    var hash = await hashPassword(password);
+    DB.users.push({id: String(idCounter++), email: email, password: hash, role: role});
+    DB.save();
+    return {ok:true};
+  },
+  login: async function(email, password) {
+    var u = DB.users.find(function(u){return u.email.toLowerCase()===email.toLowerCase();});
+    if (!u) return {ok:false,error:'Invalid credentials'};
+    if (!(await verifyPassword(password, u.password))) return {ok:false,error:'Invalid credentials'};
+    var token = await signToken(u);
+    return {ok:true, token:token, user:{id:u.id,email:u.email,role:u.role}};
+  },
+  getDoubts: function(user) {
+    var all = DB.doubts.filter(function(d){return d.status!=='solved';});
+    if (user.role==='Learner') all=all.filter(function(d){return d.learnerId===user.id;});
+    return all.slice().sort(function(a,b){return b.priorityScore-a.priorityScore;});
+  },
+  addDoubt: function(user, text, topic, deadline) {
+    var a = analyzeDoubt(text, topic, deadline);
+    var d = {
+      _id: String(idCounter++),
+      text:text, topic:topic||'General', deadline:deadline||'',
+      priorityScore:a.score, priorityLabel:a.label, reason:a.reason,
+      status:'pending', learnerId:user.id, learnerEmail:user.email,
+      solutions:[], createdAt:new Date().toISOString()
+    };
+    DB.doubts.push(d); DB.save();
+    return d;
+  },
+  solve: function(user, id, type, content) {
+    if (user.role!=='Professional') return {ok:false,error:'Only professionals can solve'};
+    var d = DB.doubts.find(function(d){return d._id===id;});
+    if (!d) return {ok:false,error:'Doubt not found'};
+    d.solutions = d.solutions||[];
+    d.solutions.push({type:type,content:content,professionalId:user.id,createdAt:new Date().toISOString()});
+    d.status='solved'; d.solverId=user.id;
+    DB.save();
+    return {ok:true};
+  }
+};
+</script>
+
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useRef } = React;
+
+// ── helpers ──────────────────────────────────────────────────────────
+function getSession() {
+  try { return JSON.parse(localStorage.getItem('da_session')); } catch { return null; }
+}
+function setSession(u) { localStorage.setItem('da_session', JSON.stringify(u)); }
+function clearSession() { localStorage.removeItem('da_session'); localStorage.removeItem('da_token'); }
+
+// ── NavBar ────────────────────────────────────────────────────────────
+function NavBar({ view, setView, user, onLogout }) {
+  return (
+    <nav className="sticky top-0 z-50 glass px-6 py-4 flex justify-between items-center mb-8">
+      <div className="flex items-center gap-3">
+        <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-blue-500 to-purple-500 flex items-center justify-center font-bold shadow-neon">D</div>
+        <h1 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-white to-gray-400">DoubtAI</h1>
+      </div>
+      <div className="flex items-center gap-6">
+        <div className="flex gap-2">
+          <button onClick={() => setView('dashboard')} className={`px-4 py-2 rounded-full text-sm font-medium transition-all ${view==='dashboard'?'bg-primary text-white shadow-neon':'text-gray-400 hover:text-white'}`}>Dashboard</button>
+          {user.role === 'Professional' && (
+            <button onClick={() => setView('focus')} className={`px-4 py-2 rounded-full text-sm font-medium transition-all ${view==='focus'?'bg-primary text-white shadow-neon':'text-gray-400 hover:text-white'}`}>Focus Mode</button>
+          )}
+        </div>
+        <div className="border-l border-gray-600 pl-6 flex items-center gap-4">
+          <div className="text-sm hidden sm:block">
+            <span className="text-gray-400">User: </span>
+            <span className="font-bold">{user.email.split('@')[0]}</span>
+            <span className={`ml-2 px-2 py-0.5 rounded text-xs ${user.role==='Professional'?'bg-purple-500/20 text-purple-400':'bg-blue-500/20 text-blue-400'}`}>{user.role}</span>
+          </div>
+          <button onClick={onLogout} className="text-sm text-gray-400 hover:text-red-400 transition-colors">Logout</button>
+        </div>
+      </div>
+    </nav>
+  );
+}
+
+// ── AuthScreen ────────────────────────────────────────────────────────
+function AuthScreen({ onLogin }) {
+  const [isLogin, setIsLogin] = useState(true);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [role, setRole] = useState('Learner');
+  const [msg, setMsg] = useState({text:'',type:''});
+  const [loading, setLoading] = useState(false);
+
+  const handle = async (e) => {
+    e.preventDefault();
+    if (!email.trim() || !password.trim()) return;
+    setLoading(true); setMsg({text:'',type:''});
+    try {
+      if (isLogin) {
+        const r = await API.login(email, password);
+        if (!r.ok) { setMsg({text:r.error,type:'error'}); setLoading(false); return; }
+        const token = await signToken(r.user);
+        localStorage.setItem('da_token', token);
+        setSession(r.user);
+        onLogin(r.user);
+      } else {
+        const r = await API.register(email, password, role);
+        if (!r.ok) { setMsg({text:r.error,type:'error'}); setLoading(false); return; }
+        setMsg({text:'Account created! Please log in.',type:'success'});
+        setIsLogin(true);
+      }
+    } catch(err) { setMsg({text:'Something went wrong.',type:'error'}); }
+    setLoading(false);
+  };
+
+  return (
+    <div className="min-h-screen flex items-center justify-center p-4">
+      <div className="glass rounded-2xl p-8 w-full max-w-md border border-gray-700/50 shadow-neon fade-in">
+        <div className="flex items-center gap-3 justify-center mb-8">
+          <div className="w-10 h-10 rounded-lg bg-gradient-to-tr from-blue-500 to-purple-500 flex items-center justify-center font-bold shadow-neon text-xl">D</div>
+          <h1 className="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-white to-gray-400">DoubtAI</h1>
+        </div>
+        <h2 className="text-xl font-semibold mb-6 text-center">{isLogin ? 'Welcome Back' : 'Create an Account'}</h2>
+        {msg.text && (
+          <div className={`p-3 rounded-lg text-sm mb-4 ${msg.type==='error'?'bg-red-500/20 text-red-400':'bg-green-500/20 text-green-400'}`}>{msg.text}</div>
+        )}
+        <form onSubmit={handle} className="flex flex-col gap-4">
+          <input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="Email" required className="bg-background/50 border border-gray-600 rounded-lg p-3 text-white focus:outline-none focus:ring-2 focus:ring-primary text-sm" />
+          <input type="password" value={password} onChange={e=>setPassword(e.target.value)} placeholder="Password" required className="bg-background/50 border border-gray-600 rounded-lg p-3 text-white focus:outline-none focus:ring-2 focus:ring-primary text-sm" />
+          {!isLogin && (
+            <select value={role} onChange={e=>setRole(e.target.value)} className="bg-background/50 border border-gray-600 rounded-lg p-3 text-white focus:outline-none focus:ring-2 focus:ring-primary text-sm">
+              <option value="Learner">I am a Learner</option>
+              <option value="Professional">I am a Professional</option>
+            </select>
+          )}
+          <button type="submit" disabled={loading} className="bg-gradient-to-r from-primary to-purple-600 text-white font-medium py-3 rounded-lg shadow-neon mt-2 transition-all hover:scale-[1.02] disabled:opacity-60 flex items-center justify-center gap-2">
+            {loading && <span className="spinner"></span>}
+            {isLogin ? 'Login' : 'Sign Up'}
+          </button>
+        </form>
+        <p className="mt-6 text-center text-sm text-gray-400">
+          {isLogin ? "Don't have an account? " : 'Already have an account? '}
+          <button onClick={() => { setIsLogin(!isLogin); setMsg({text:'',type:''}); }} className="text-primary hover:underline">{isLogin ? 'Sign up' : 'Login'}</button>
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// ── InputSection ──────────────────────────────────────────────────────
+function InputSection({ onAdd }) {
+  const [text, setText] = useState('');
+  const [topic, setTopic] = useState('');
+  const [deadline, setDeadline] = useState('');
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    if (!text.trim()) return;
+    onAdd({ text, topic, deadline });
+    setText(''); setTopic(''); setDeadline('');
+  };
+
+  return (
+    <div className="glass rounded-2xl p-6 mx-auto max-w-3xl mb-12 shadow-xl border border-gray-700/50 fade-in">
+      <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" strokeWidth="2"><path d="M12 2l3 7h7l-5.5 4 2 7L12 16l-6.5 4 2-7L2 9h7z"/></svg>
+        Ask a Doubt
+      </h2>
+      <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+        <textarea value={text} onChange={e=>setText(e.target.value)} placeholder="What are you struggling with? e.g., 'Recursion concept not clear, exam tomorrow'" className="bg-background/50 border border-gray-600 rounded-xl p-4 text-white focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent transition-all resize-none h-24 placeholder-gray-500" />
+        <div className="flex gap-4 flex-wrap">
+          <input type="text" value={topic} onChange={e=>setTopic(e.target.value)} placeholder="Topic (e.g. DSA)" className="bg-background/50 border border-gray-600 rounded-lg p-3 flex-1 min-w-[200px] focus:outline-none focus:ring-2 focus:ring-primary transition-all text-sm" />
+          <input type="text" value={deadline} onChange={e=>setDeadline(e.target.value)} placeholder="Deadline (e.g. Tomorrow)" className="bg-background/50 border border-gray-600 rounded-lg p-3 flex-1 min-w-[200px] focus:outline-none focus:ring-2 focus:ring-primary transition-all text-sm" />
+          <button disabled={!text.trim()} type="submit" className="bg-gradient-to-r from-primary to-purple-600 hover:from-blue-500 hover:to-purple-500 text-white font-medium py-3 px-8 rounded-lg shadow-neon transform active:scale-95 transition-all flex items-center gap-2 disabled:opacity-40">
+            Add Doubt
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+// ── DoubtCard ─────────────────────────────────────────────────────────
+function DoubtCard({ doubt, role, onSolve, isFocusMode }) {
+  const [showSolve, setShowSolve] = useState(false);
+  const [solveType, setSolveType] = useState('text');
+  const [solveContent, setSolveContent] = useState('');
+
+  const colorMap = {High:'text-high',Medium:'text-medium',Low:'text-low'};
+  const borderMap = {High:'border-high',Medium:'border-medium',Low:'border-low'};
+  const shadowMap = {High:'shadow-glow-high',Medium:'shadow-glow-medium',Low:'shadow-glow-low'};
+  const color  = colorMap[doubt.priorityLabel]  || 'text-low';
+  const border = borderMap[doubt.priorityLabel] || 'border-low';
+  const shadow = shadowMap[doubt.priorityLabel] || 'shadow-glow-low';
+
+  const submitSolve = () => {
+    if (!solveContent.trim()) return;
+    onSolve(doubt._id, { type: solveType, content: solveContent });
+    setSolveContent(''); setShowSolve(false);
+  };
+
+  const reasons = Array.isArray(doubt.reason) ? doubt.reason : (doubt.reason||'').split('\n').filter(Boolean);
+
+  return (
+    <div className={`glass rounded-2xl p-6 border-l-4 ${border} flex flex-col justify-between fade-in ${isFocusMode ? `${shadow} max-w-4xl mx-auto p-10 mt-10` : 'hover:-translate-y-1 transition-all duration-300'}`}>
+      <div>
+        <div className="flex justify-between items-start mb-4">
+          <div className="flex items-center gap-2">
+            <span className={`px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-black/40 ${color}`}>
+              {doubt.priorityLabel} Priority
+            </span>
+            {doubt.topic && <span className="text-xs text-gray-400 bg-gray-800 px-2 py-1 rounded-md">{doubt.topic}</span>}
+          </div>
+          {isFocusMode && <span className="text-primary font-mono bg-primary/10 px-3 py-1 rounded-lg">Score: {Math.round(doubt.priorityScore||0)}</span>}
+        </div>
+        <h3 className={`${isFocusMode?'text-3xl leading-tight':'text-xl'} font-semibold text-white mb-6 leading-snug`}>{doubt.text}</h3>
+        {reasons.length > 0 && (
+          <div className="bg-black/30 rounded-xl p-4 border border-gray-700/50 mb-4">
+            <div className="flex items-center gap-2 text-sm text-gray-300 mb-2 font-medium">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#a855f7" strokeWidth="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
+              AI Analysis Reason:
+            </div>
+            <ul className="space-y-2">
+              {reasons.map((r,i) => (
+                <li key={i} className="text-sm text-gray-400 flex items-start gap-2">
+                  <span className="w-1.5 h-1.5 rounded-full mt-1.5 flex-shrink-0 bg-white"></span>
+                  {r.replace(/^-\s*/,'')}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {doubt.deadline && <div className="text-xs text-gray-500 mb-3">⏰ Deadline: {doubt.deadline}</div>}
+      </div>
+
+      <div className="mt-6 flex flex-col gap-4">
+        {role === 'Professional' && !showSolve && (
+          <button onClick={() => setShowSolve(true)} className="bg-gradient-to-r from-green-500 to-emerald-600 hover:from-green-400 hover:to-emerald-500 text-white px-6 py-3 rounded-xl font-medium shadow-glow-low transition-all self-start flex items-center gap-2">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+            {isFocusMode ? 'Solve Now' : 'Solve'}
+          </button>
+        )}
+        {role === 'Professional' && showSolve && (
+          <div className="bg-gray-900/50 rounded-xl p-4 border border-gray-700">
+            <div className="flex gap-2 mb-3">
+              <select value={solveType} onChange={e=>setSolveType(e.target.value)} className="bg-gray-800 text-white border border-gray-600 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-primary">
+                <option value="text">Text / Notes</option>
+                <option value="video">Video URL</option>
+                <option value="image">Image URL</option>
+              </select>
+            </div>
+            <textarea value={solveContent} onChange={e=>setSolveContent(e.target.value)} placeholder={solveType==='text'?'Write out a detailed explanation...':'Paste link here...'} className="w-full bg-background/50 border border-gray-600 rounded-lg p-3 text-white focus:outline-none focus:ring-2 focus:ring-primary transition-all resize-none h-20 placeholder-gray-500 mb-3 text-sm"></textarea>
+            <div className="flex gap-2">
+              <button onClick={submitSolve} className="bg-green-500 hover:bg-green-400 text-white px-4 py-2 rounded-lg text-sm font-medium transition-all">Submit Solution</button>
+              <button onClick={() => setShowSolve(false)} className="bg-gray-700 hover:bg-gray-600 text-white px-4 py-2 rounded-lg text-sm font-medium transition-all">Cancel</button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── App ───────────────────────────────────────────────────────────────
+function App() {
+  const [user, setUser] = useState(null);
+  const [doubts, setDoubts] = useState([]);
+  const [view, setView] = useState('dashboard');
+
+  // restore session
+  useEffect(() => {
+    const s = getSession();
+    if (s) setUser(s);
+  }, []);
+
+  useEffect(() => {
+    if (user) loadDoubts();
+  }, [user]);
+
+  const loadDoubts = () => setDoubts(API.getDoubts(user));
+
+  const handleLogin = (u) => { setSession(u); setUser(u); };
+  const handleLogout = () => { clearSession(); setUser(null); setDoubts([]); setView('dashboard'); };
+
+  const handleAdd = ({ text, topic, deadline }) => {
+    API.addDoubt(user, text, topic, deadline);
+    loadDoubts();
+  };
+
+  const handleSolve = (id, solution) => {
+    API.solve(user, id, solution.type, solution.content);
+    loadDoubts();
+    if (view === 'focus') setView('focus'); // refresh
+  };
+
+  if (!user) return <AuthScreen onLogin={handleLogin} />;
+
+  const role = user.role;
+  const isFocus = view === 'focus' && role === 'Professional';
+
+  return (
+    <div className="container mx-auto px-4 max-w-6xl">
+      <NavBar setView={setView} view={view} user={user} onLogout={handleLogout} />
+
+      {isFocus ? (
+        <div className="max-w-4xl mx-auto">
+          <div className="text-center mb-8 fade-in">
+            <span className="bg-primary/20 text-primary font-bold px-4 py-2 rounded-full border border-primary/30 inline-block mb-4 shadow-neon">Active Focus</span>
+            <h2 className="text-4xl font-bold">Highest Priority Issue</h2>
+            <p className="text-gray-400 mt-2">This student needs help urgently.</p>
+          </div>
+          {doubts.length > 0
+            ? <DoubtCard doubt={doubts[0]} role={role} onSolve={handleSolve} isFocusMode={true} />
+            : <div className="text-center py-20 text-gray-500">Nothing to focus on — all clear!</div>
+          }
+        </div>
+      ) : (
+        <>
+          {role === 'Learner' && <InputSection onAdd={handleAdd} />}
+
+          <div className="mb-6 flex justify-between items-end max-w-3xl mx-auto">
+            <div>
+              <h2 className="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-white to-gray-400">
+                {role === 'Professional' ? 'All Student Doubts' : 'Your Priority Queue'}
+              </h2>
+              <p className="text-gray-400 text-sm mt-1">
+                {role === 'Professional' ? 'Sorted by high-impact so you can help efficiently.' : 'Smart sorted to optimize your learning sequence.'}
+              </p>
+            </div>
+            <div className="text-sm text-gray-500 font-mono bg-gray-900 px-3 py-1 rounded border border-gray-800">{doubts.length} Items</div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 max-w-5xl mx-auto">
+            {doubts.length === 0 ? (
+              <div className="col-span-2 text-center py-20 text-gray-500">
+                <svg className="w-12 h-12 mx-auto mb-4 opacity-50" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M4 22h16a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2v2"/><path d="M2 22h4v-4H2z"/></svg>
+                <p>No doubts yet. {role === 'Learner' ? "Add one above!" : "You're all caught up!"}</p>
+              </div>
+            ) : (
+              doubts.map((d, i) => <DoubtCard key={d._id} doubt={d} index={i} role={role} onSolve={handleSolve} isFocusMode={false} />)
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App />);
+</script>
+</body>
+</html>
